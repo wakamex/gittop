@@ -36,8 +36,9 @@ impl Repo {
 
     /// Newest modification time, in seconds, of the files Git updates on every commit,
     /// merge, rebase, pull, or branch change. Unchanged stamps mean no new local commits, so
-    /// callers skip running git. The index is left out: any `git status`, such as a shell
-    /// prompt's, rewrites it without changing history.
+    /// callers skip running git. The index is left out: `git status` and similar commands
+    /// rewrite it to refresh cached file metadata, unless run with `GIT_OPTIONAL_LOCKS=0`,
+    /// without changing history.
     pub fn stamp(&self) -> u64 {
         let mut newest = 0;
         for file in [
@@ -63,8 +64,10 @@ struct Cache {
 const CACHE_MAX_AGE: u64 = 24 * 60 * 60;
 
 /// Returns the repositories under `roots`, from the cache when no root folder changed.
-/// Adding or removing a project folder changes its root's mtime and triggers a rebuild;
-/// nested repositories are picked up by the daily rebuild or `--rescan`.
+/// Adding or removing a project folder changes its root's mtime and triggers a rebuild.
+/// Cached repositories whose git directory is gone are dropped on every load, so a removed
+/// nested repository disappears at once; new nested repositories appear with the daily
+/// rebuild or `--rescan`.
 pub fn load(roots: &[PathBuf], depth: usize, rescan: bool) -> Vec<Repo> {
     let path = cache_path();
     let stamps: Vec<(PathBuf, u64)> = roots.iter().map(|r| (r.clone(), mtime(r))).collect();
@@ -76,25 +79,46 @@ pub fn load(roots: &[PathBuf], depth: usize, rescan: bool) -> Vec<Repo> {
         && cache.depth == depth
         && now().saturating_sub(cache.written) < CACHE_MAX_AGE
     {
-        return cache.repos;
+        let repos: Vec<Repo> = cache
+            .repos
+            .iter()
+            .filter(|r| r.git_dir.is_dir())
+            .cloned()
+            .collect();
+        if repos.len() < cache.repos.len() {
+            save(
+                &path,
+                &Cache {
+                    repos: repos.clone(),
+                    ..cache
+                },
+            );
+        }
+        return repos;
     }
     let repos = discover(roots, depth);
-    let cache = Cache {
-        roots: stamps,
-        depth,
-        written: now(),
-        repos: repos.clone(),
-    };
+    save(
+        &path,
+        &Cache {
+            roots: stamps,
+            depth,
+            written: now(),
+            repos: repos.clone(),
+        },
+    );
+    repos
+}
+
+fn save(path: &Path, cache: &Cache) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec(&cache) {
+    if let Ok(bytes) = serde_json::to_vec(cache) {
         let temporary = path.with_extension("tmp");
         if fs::write(&temporary, bytes).is_ok() {
-            let _ = fs::rename(&temporary, &path);
+            let _ = fs::rename(&temporary, path);
         }
     }
-    repos
 }
 
 fn cache_path() -> PathBuf {
