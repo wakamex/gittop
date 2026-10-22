@@ -15,6 +15,8 @@ cargo run --release -- --once --feed --json
 
 The default root is `/code`, searched three folder levels deep, with a 24-hour window. `--once` prints the current activity and exits, and `--json` makes that output machine-readable.
 
+A linked worktree (made with `git worktree add`) shares its repository's branches, so it would list the same commits as the main working tree. `gittop` lists only the main working tree, or the first worktree found when the main one is outside the searched folders. `--worktrees` lists each worktree as its own row.
+
 ## Columns
 
 - `AGE`: time since the newest commit on any local branch.

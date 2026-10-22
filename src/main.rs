@@ -8,6 +8,8 @@ use app::{App, Prefs, View, age, parse_window};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -47,6 +49,9 @@ struct Args {
     /// Rebuild the cached repository list.
     #[arg(long)]
     rescan: bool,
+    /// List linked worktrees as their own rows instead of only their main working tree.
+    #[arg(long)]
+    worktrees: bool,
     /// Ignore and do not save view preferences.
     #[arg(long)]
     no_config: bool,
@@ -64,7 +69,10 @@ fn main() -> color_eyre::Result<()> {
         .iter()
         .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()))
         .collect();
-    let repos = repos::load(&roots, args.depth, args.rescan);
+    let mut repos = repos::load(&roots, args.depth, args.rescan);
+    if !args.worktrees {
+        repos = repos::drop_linked_worktrees(repos);
+    }
     if args.once {
         return once(&args, &roots, repos);
     }
@@ -292,6 +300,7 @@ fn once(args: &Args, roots: &[PathBuf], repos: Vec<repos::Repo>) -> color_eyre::
         app.set_activity(i, a);
     }
     let rows = app.rows();
+    let mut out = String::new();
     if args.feed {
         let feed = app.feed();
         if args.json {
@@ -299,19 +308,20 @@ fn once(args: &Args, roots: &[PathBuf], repos: Vec<repos::Repo>) -> color_eyre::
                 .iter()
                 .map(|f| serde_json::json!({"repositories": f.repos, "commit": f.commit}))
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&items)?);
+            writeln!(out, "{}", serde_json::to_string_pretty(&items)?)?;
         } else {
             for item in feed {
-                println!(
+                writeln!(
+                    out,
                     "{:>4}  {:<28}  {:<16}  {}",
                     age(item.commit.time),
                     item.repos.join(","),
                     item.commit.author,
                     item.commit.subject
-                );
+                )?;
             }
         }
-        return Ok(());
+        return print(&out);
     }
     if args.json {
         let items: Vec<_> = rows
@@ -327,8 +337,8 @@ fn once(args: &Args, roots: &[PathBuf], repos: Vec<repos::Repo>) -> color_eyre::
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
-        return Ok(());
+        writeln!(out, "{}", serde_json::to_string_pretty(&items)?)?;
+        return print(&out);
     }
     for row in &rows {
         let a = app.activity[row.index].as_ref();
@@ -338,14 +348,27 @@ fn once(args: &Args, roots: &[PathBuf], repos: Vec<repos::Repo>) -> color_eyre::
             (false, false) => "local".into(),
         });
         let latest = row.latest.as_ref().map_or("", |c| c.subject.as_str());
-        println!(
-            "{:>4}  {:<32}  {:>3} commits  {:>5} unpushed  {}",
+        let commits = match row.commits {
+            1 => "1 commit".to_string(),
+            n => format!("{n} commits"),
+        };
+        writeln!(
+            out,
+            "{:>4}  {:<32}  {:<11}  {:>5} unpushed  {}",
             age(row.last),
             row.name,
-            row.commits,
+            commits,
             unpushed,
             latest
-        );
+        )?;
     }
-    Ok(())
+    print(&out)
+}
+
+/// Writes `--once` output, treating a reader that stopped early, such as `head`, as success.
+fn print(out: &str) -> color_eyre::Result<()> {
+    match std::io::stdout().lock().write_all(out.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => Ok(result?),
+    }
 }

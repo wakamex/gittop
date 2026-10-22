@@ -1,6 +1,7 @@
 //! Repository discovery, the cached repository list, and cheap change stamps.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -107,6 +108,25 @@ pub fn load(roots: &[PathBuf], depth: usize, rescan: bool) -> Vec<Repo> {
         },
     );
     repos
+}
+
+/// Drops linked worktrees whose main working tree is also listed. Worktrees share their
+/// repository's branches, so each would list the same commits as the main working tree. A
+/// repository found only through its worktrees keeps the first one.
+pub fn drop_linked_worktrees(repos: Vec<Repo>) -> Vec<Repo> {
+    let is_main = |r: &Repo| r.git_dir == r.common_dir;
+    let mains: HashSet<PathBuf> = repos
+        .iter()
+        .filter(|r| is_main(r))
+        .map(|r| r.common_dir.clone())
+        .collect();
+    let mut kept = HashSet::new();
+    repos
+        .into_iter()
+        .filter(|r| {
+            is_main(r) || (!mains.contains(&r.common_dir) && kept.insert(r.common_dir.clone()))
+        })
+        .collect()
 }
 
 fn save(path: &Path, cache: &Cache) {
@@ -258,4 +278,33 @@ pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(path: &str, git_dir: &str, common_dir: &str) -> Repo {
+        Repo {
+            path: path.into(),
+            git_dir: git_dir.into(),
+            common_dir: common_dir.into(),
+            identities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn linked_worktrees_collapse_into_their_repository() {
+        let repos = vec![
+            repo("/c/a", "/c/a/.git", "/c/a/.git"),
+            repo("/c/a-fix", "/c/a/.git/worktrees/a-fix", "/c/a/.git"),
+            repo("/c/b-one", "/x/b/.git/worktrees/b-one", "/x/b/.git"),
+            repo("/c/b-two", "/x/b/.git/worktrees/b-two", "/x/b/.git"),
+        ];
+        let paths: Vec<PathBuf> = drop_linked_worktrees(repos)
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(paths, [PathBuf::from("/c/a"), PathBuf::from("/c/b-one")]);
+    }
 }
