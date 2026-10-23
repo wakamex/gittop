@@ -19,7 +19,7 @@ use std::time::Duration;
 #[command(version)]
 struct Args {
     /// Folders to search for repositories.
-    #[arg(default_value = "/code")]
+    #[arg(default_value = ".")]
     roots: Vec<PathBuf>,
     /// How many folder levels below each root to search.
     #[arg(long, default_value_t = 3)]

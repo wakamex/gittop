@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,7 +71,7 @@ const CACHE_MAX_AGE: u64 = 24 * 60 * 60;
 /// nested repository disappears at once; new nested repositories appear with the daily
 /// rebuild or `--rescan`.
 pub fn load(roots: &[PathBuf], depth: usize, rescan: bool) -> Vec<Repo> {
-    let path = cache_path();
+    let path = cache_path(roots, depth);
     let stamps: Vec<(PathBuf, u64)> = roots.iter().map(|r| (r.clone(), mtime(r))).collect();
     if !rescan
         && let Some(cache) = fs::read(&path)
@@ -141,11 +142,14 @@ fn save(path: &Path, cache: &Cache) {
     }
 }
 
-fn cache_path() -> PathBuf {
+/// One cache file per set of roots and depth, so running from different folders keeps each list.
+fn cache_path(roots: &[PathBuf], depth: usize) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    (roots, depth).hash(&mut hasher);
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".cache"));
-    base.join("gittop/repos.json")
+    base.join(format!("gittop/repos-{:016x}.json", hasher.finish()))
 }
 
 pub fn home() -> PathBuf {
@@ -180,7 +184,7 @@ pub fn discover(roots: &[PathBuf], depth: usize) -> Vec<Repo> {
 }
 
 /// Collects every folder with a `.git` entry, including repositories nested inside others,
-/// since a root such as `/code` may itself hold a `.git` folder. Folders that `git` does not
+/// since a root folder may itself hold a `.git` folder. Folders that `git` does not
 /// accept as repositories are dropped when resolved.
 fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     if dir.join(".git").exists() {
