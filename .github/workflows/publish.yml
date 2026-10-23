@@ -1,0 +1,55 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validation.yml
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: wakamex/release-actions/verify-release-tag@stable
+        with:
+          version-command: cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gittop") | .version'
+      - name: Check whether crates.io already has this version
+        id: published
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          status=$(curl -s -o /dev/null -w '%{http_code}' -A "wakamex/gittop publish" "https://crates.io/api/v1/crates/gittop/$version")
+          if [ "$status" = 200 ]; then
+            curl -sSfL -A "wakamex/gittop publish" -o crate.tar.gz "https://static.crates.io/crates/gittop/gittop-$version.crate"
+            sha=$(tar -xzOf crate.tar.gz "gittop-$version/.cargo_vcs_info.json" | jq -r .git.sha1)
+            [ "$sha" = "$GITHUB_SHA" ] || { echo "crates.io has $version from $sha, not $GITHUB_SHA" >&2; exit 1; }
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif [ "$status" = 404 ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "crates.io lookup returned $status" >&2; exit 1
+          fi
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.published.outputs.exists == 'false'
+        id: auth
+      - if: steps.published.outputs.exists == 'false'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  github-release:
+    needs: publish
+    permissions:
+      contents: write
+    uses: wakamex/release-actions/.github/workflows/github-release.yml@stable

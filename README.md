@@ -6,11 +6,13 @@ It reads only your local repositories and never contacts a remote.
 
 ## Install
 
-`gittop` needs `git` on the PATH, and building it needs Rust 1.88 or newer. Install it from GitHub, or from a checkout with `cargo install --locked --path .`:
+`gittop` needs `git` on the PATH, and building it needs Rust 1.88 or newer. Install it from [crates.io](https://crates.io/crates/gittop):
 
 ```sh
-cargo install --locked --git https://github.com/wakamex/gittop
+cargo install --locked gittop
 ```
+
+`--locked` builds with the dependency versions `gittop` was tested with. From a checkout, use `cargo install --locked --path .`.
 
 It has been tested on Linux.
 
