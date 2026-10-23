@@ -265,7 +265,8 @@ fn newest_in(dir: &Path) -> u64 {
     let mut newest = mtime(dir);
     for entry in entries.flatten() {
         let path = entry.path();
-        newest = newest.max(if path.is_dir() {
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        newest = newest.max(if is_dir {
             newest_in(&path)
         } else {
             mtime(&path)

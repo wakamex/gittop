@@ -43,7 +43,7 @@ struct Args {
     /// With --once, list commits newest first instead of repositories.
     #[arg(long, requires = "once")]
     feed: bool,
-    /// Seconds between checks for new activity.
+    /// Seconds between checks of repositories whose folders cannot be watched for changes.
     #[arg(long, default_value_t = 2)]
     interval: u64,
     /// Rebuild the cached repository list.
@@ -93,30 +93,41 @@ fn main() -> color_eyre::Result<()> {
         limit: COMMIT_LIMIT,
         interval: Duration::from_secs(args.interval.max(1)),
     };
+    let watch_tx = request_tx.clone();
     std::thread::Builder::new()
         .name("gittop-collector".into())
-        .spawn(move || collector::run(repos, settings, update_tx, request_rx))?;
+        .spawn(move || collector::run(repos, settings, update_tx, request_rx, watch_tx))?;
 
     let mut terminal = ratatui::init();
     let mut state = TableState::default().with_selected(Some(0));
     let result = (|| -> color_eyre::Result<()> {
+        // Redraw only after an update, an input event, or a new second for the ages shown.
+        let mut changed = true;
+        let mut drawn_at = 0;
+        let mut listed = 0;
         loop {
-            while let Ok(update) = update_rx.try_recv() {
+            for update in update_rx.try_iter() {
                 match update {
                     collector::Update::Activity(i, a) => app.set_activity(i, a),
                     collector::Update::Ready => app.ready = true,
                 }
+                changed = true;
             }
-            let listed = match app.prefs.view {
-                View::Repos => app.rows().len(),
-                View::Feed => app.feed().len(),
-            };
-            app.selected = app.selected.min(listed.saturating_sub(1));
-            state.select(Some(app.selected));
-            terminal.draw(|frame| ui::draw(frame, &app, &mut state))?;
+            if changed || repos::now() != drawn_at {
+                listed = match app.prefs.view {
+                    View::Repos => app.rows().len(),
+                    View::Feed => app.feed().len(),
+                };
+                app.selected = app.selected.min(listed.saturating_sub(1));
+                state.select(Some(app.selected));
+                terminal.draw(|frame| ui::draw(frame, &app, &mut state))?;
+                changed = false;
+                drawn_at = repos::now();
+            }
             if !event::poll(Duration::from_millis(200))? {
                 continue;
             }
+            changed = true;
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
                 && !handle_key(&mut app, key, listed, &request_tx)
