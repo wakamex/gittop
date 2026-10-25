@@ -1,6 +1,6 @@
 [package]
 name = "gittop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Live view of your latest Git activity across every repository under a folder"
