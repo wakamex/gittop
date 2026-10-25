@@ -306,7 +306,6 @@ mod tests {
                 path: PathBuf::from(format!("/r/{i}")),
                 git_dir: PathBuf::new(),
                 common_dir: PathBuf::new(),
-                identities: vec![],
             })
             .collect();
         let mut app = App::new(repos, &[PathBuf::from("/r")], Prefs::default(), 86400);

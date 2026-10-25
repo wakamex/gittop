@@ -66,7 +66,7 @@ Finding the repositories and reading their activity are both kept off the slow p
 - The index is ignored because `git status` and similar commands rewrite it to refresh cached file metadata, unless run with `GIT_OPTIONAL_LOCKS=0`, without changing any history. Changes to it and to other files in the git directory wake `gittop` without running `git`.
 - Uncommitted changes are not shown, because measuring them needs `git status` in every repository.
 
-On a machine with 921 repositories under `/code`, a 24-hour `--once` run takes about 0.2 seconds with the repository list cached. The live view watches about 2,800 folders, picks up a commit about 0.1 seconds after it is made, and uses about 0.3% of one CPU core while idle.
+On a machine with 921 repositories under `/code`, a 24-hour `--once` run takes about 0.2 seconds with the repository list cached, and about 0.7 seconds when the list is rebuilt, since finding repositories reads their `.git` entries without running `git`. The live view watches about 2,800 folders, picks up a commit about 0.1 seconds after it is made, and uses about 0.3% of one CPU core while idle.
 
 Commits that reach a repository only through `git fetch` update remote-tracking branches, not local ones, so they appear once they are merged or pulled into a local branch.
 

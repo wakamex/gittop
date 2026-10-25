@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Directories never searched for repositories.
@@ -19,8 +18,6 @@ pub struct Repo {
     pub git_dir: PathBuf,
     /// Directory holding branches and their reflogs, shared by all worktrees.
     pub common_dir: PathBuf,
-    /// Author identities counted as the user's own commits.
-    pub identities: Vec<String>,
 }
 
 impl Repo {
@@ -161,26 +158,37 @@ pub fn home() -> PathBuf {
 /// Walks each root up to `depth` levels and resolves every working tree it finds.
 pub fn discover(roots: &[PathBuf], depth: usize) -> Vec<Repo> {
     let mut trees = Vec::new();
+    let mut tops = Vec::new();
     for root in roots {
-        walk(root, depth, &mut trees);
+        if root.join(".git").exists() {
+            trees.push(root.clone());
+        }
+        if depth > 0 {
+            tops.extend(subfolders(root));
+        }
     }
-    trees.sort();
-    trees.dedup();
-    let mut repos: Vec<Repo> = std::thread::scope(|scope| {
-        let chunks: Vec<_> = trees.chunks(trees.len().div_ceil(16).max(1)).collect();
-        let handles: Vec<_> = chunks
-            .into_iter()
-            .map(|chunk| {
-                scope.spawn(move || chunk.iter().filter_map(|t| resolve(t)).collect::<Vec<_>>())
+    // Walk the roots' subfolders on several threads, interleaved so large folders spread out.
+    const THREADS: usize = 16;
+    let tops = &tops;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                scope.spawn(move || {
+                    let mut found = Vec::new();
+                    for dir in tops.iter().skip(i).step_by(THREADS) {
+                        walk(dir, depth - 1, &mut found);
+                    }
+                    found
+                })
             })
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
+        for handle in handles {
+            trees.extend(handle.join().unwrap_or_default());
+        }
     });
-    repos.sort_by(|a, b| a.path.cmp(&b.path));
-    repos
+    trees.sort();
+    trees.dedup();
+    trees.iter().filter_map(|t| resolve(t)).collect()
 }
 
 /// Collects every folder with a `.git` entry, including repositories nested inside others,
@@ -190,67 +198,53 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     if dir.join(".git").exists() {
         found.push(dir.to_path_buf());
     }
-    if depth == 0 {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if !kind.is_dir() {
-            continue;
+    if depth > 0 {
+        for sub in subfolders(dir) {
+            walk(&sub, depth - 1, found);
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
-            continue;
-        }
-        walk(&entry.path(), depth - 1, found);
     }
 }
 
-fn resolve(tree: &Path) -> Option<Repo> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(tree)
-        .args(["rev-parse", "--absolute-git-dir", "--git-common-dir"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines();
-    let git_dir = PathBuf::from(lines.next()?);
-    let common = PathBuf::from(lines.next()?);
-    let common_dir = if common.is_absolute() {
-        common
-    } else {
-        tree.join(common)
+/// Subfolders worth searching: not hidden and not a known build or dependency folder.
+fn subfolders(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let common_dir = common_dir.canonicalize().unwrap_or(common_dir);
-    let mut identities = Vec::new();
-    for key in ["user.name", "user.email"] {
-        if let Ok(out) = Command::new("git")
-            .arg("-C")
-            .arg(tree)
-            .args(["config", key])
-            .output()
-        {
-            let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !value.is_empty() {
-                identities.push(value);
-            }
-        }
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref())
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Reads a working tree's git directories from its `.git` entry without running git: a
+/// folder, or for linked worktrees and submodules a `gitdir:` file, whose target holds a
+/// `commondir` file when it is a linked worktree.
+fn resolve(tree: &Path) -> Option<Repo> {
+    let dot_git = tree.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = fs::read_to_string(&dot_git).ok()?;
+        tree.join(text.strip_prefix("gitdir:")?.trim())
+    };
+    let git_dir = git_dir.canonicalize().ok()?;
+    let common_dir = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(text) => git_dir.join(text.trim()).canonicalize().ok()?,
+        Err(_) => git_dir.clone(),
+    };
+    if !git_dir.join("HEAD").is_file() || !common_dir.join("objects").is_dir() {
+        return None;
     }
     Some(Repo {
         path: tree.to_path_buf(),
         git_dir,
         common_dir,
-        identities,
     })
 }
 
@@ -294,7 +288,6 @@ mod tests {
             path: path.into(),
             git_dir: git_dir.into(),
             common_dir: common_dir.into(),
-            identities: Vec::new(),
         }
     }
 

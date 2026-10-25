@@ -72,9 +72,21 @@ pub fn read(repo: &Repo, since: u64, me: &[String], limit: usize) -> Activity {
         &["log", "--branches", &since_arg, &limit_arg, &format],
     )
     .unwrap_or_default();
+    // The repository's user.name and user.email, plus --me, count as the user's own.
+    let mut identities: Vec<String> =
+        git(repo, &["config", "--get-regexp", r"^user\.(name|email)$"])
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                line.split_once(' ')
+                    .map(|(_, value)| value.trim().to_string())
+            })
+            .filter(|value| !value.is_empty())
+            .collect();
+    identities.extend_from_slice(me);
     let commits: Vec<Commit> = log
         .lines()
-        .filter_map(|line| parse(line, repo, me))
+        .filter_map(|line| parse(line, &identities))
         .collect();
     let last_commit = commits.first().map(|c| c.time).unwrap_or_else(|| {
         git(repo, &["log", "--branches", "-n1", "--format=%ct"])
@@ -106,17 +118,15 @@ fn head_branch(repo: &Repo) -> String {
         .map_or_else(|| "(detached)".to_string(), str::to_string)
 }
 
-fn parse(line: &str, repo: &Repo, me: &[String]) -> Option<Commit> {
+fn parse(line: &str, identities: &[String]) -> Option<Commit> {
     let mut fields = line.splitn(5, SEP);
     let sha = fields.next()?.to_string();
     let time = fields.next()?.parse().ok()?;
     let author = fields.next()?.to_string();
     let email = fields.next()?.to_string();
     let subject = fields.next().unwrap_or_default().to_string();
-    let mine = repo
-        .identities
+    let mine = identities
         .iter()
-        .chain(me)
         .any(|id| id.eq_ignore_ascii_case(&author) || id.eq_ignore_ascii_case(&email));
     Some(Commit {
         sha,
