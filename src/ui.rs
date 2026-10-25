@@ -46,7 +46,7 @@ pub fn draw(frame: &mut Frame, app: &App, state: &mut TableState) {
     let status = format!(
         " gittop  {} of {} repos  window {}  sort {}  {}{}{}",
         rows.len(),
-        app.repos.len(),
+        app.repos.len() - app.gone.len(),
         format_window(app.window_secs),
         app.prefs.sort.label(),
         if app.prefs.mine_only {

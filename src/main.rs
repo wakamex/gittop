@@ -69,10 +69,14 @@ fn main() -> color_eyre::Result<()> {
         .iter()
         .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()))
         .collect();
-    let mut repos = repos::load(&roots, args.depth, args.rescan);
-    if !args.worktrees {
-        repos = repos::drop_linked_worktrees(repos);
-    }
+    // The live view brings a stale cached list up to date in the background, so it starts
+    // from any cached list; --once needs a current one.
+    let all = repos::load(&roots, args.depth, args.rescan, !args.once);
+    let repos = if args.worktrees {
+        all.clone()
+    } else {
+        repos::drop_linked_worktrees(all.clone())
+    };
     if args.once {
         return once(&args, &roots, repos);
     }
@@ -92,11 +96,14 @@ fn main() -> color_eyre::Result<()> {
         me: args.me.clone(),
         limit: COMMIT_LIMIT,
         interval: Duration::from_secs(args.interval.max(1)),
+        roots: roots.clone(),
+        depth: args.depth,
+        worktrees: args.worktrees,
     };
     let watch_tx = request_tx.clone();
     std::thread::Builder::new()
         .name("gittop-collector".into())
-        .spawn(move || collector::run(repos, settings, update_tx, request_rx, watch_tx))?;
+        .spawn(move || collector::run(all, repos, settings, update_tx, request_rx, watch_tx))?;
 
     let mut terminal = ratatui::init();
     let mut state = TableState::default().with_selected(Some(0));
@@ -109,6 +116,8 @@ fn main() -> color_eyre::Result<()> {
             for update in update_rx.try_iter() {
                 match update {
                     collector::Update::Activity(i, a) => app.set_activity(i, a),
+                    collector::Update::Added(repo) => app.add(repo, &roots),
+                    collector::Update::Gone(i) => app.remove(i),
                     collector::Update::Ready => app.ready = true,
                 }
                 changed = true;

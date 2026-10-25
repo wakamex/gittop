@@ -66,17 +66,18 @@ const CACHE_MAX_AGE: u64 = 24 * 60 * 60;
 /// Adding or removing a project folder changes its root's mtime and triggers a rebuild.
 /// Cached repositories whose git directory is gone are dropped on every load, so a removed
 /// nested repository disappears at once; new nested repositories appear with the daily
-/// rebuild or `--rescan`.
-pub fn load(roots: &[PathBuf], depth: usize, rescan: bool) -> Vec<Repo> {
+/// rebuild or `--rescan`. With `stale_ok`, any cached list for these roots and depth is used,
+/// for callers that bring it up to date themselves.
+pub fn load(roots: &[PathBuf], depth: usize, rescan: bool, stale_ok: bool) -> Vec<Repo> {
     let path = cache_path(roots, depth);
-    let stamps: Vec<(PathBuf, u64)> = roots.iter().map(|r| (r.clone(), mtime(r))).collect();
     if !rescan
         && let Some(cache) = fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Cache>(&bytes).ok())
-        && cache.roots == stamps
         && cache.depth == depth
-        && now().saturating_sub(cache.written) < CACHE_MAX_AGE
+        && (stale_ok
+            || (cache.roots == root_stamps(roots)
+                && now().saturating_sub(cache.written) < CACHE_MAX_AGE))
     {
         let repos: Vec<Repo> = cache
             .repos
@@ -96,16 +97,21 @@ pub fn load(roots: &[PathBuf], depth: usize, rescan: bool) -> Vec<Repo> {
         return repos;
     }
     let repos = discover(roots, depth);
+    store(roots, depth, &repos);
+    repos
+}
+
+/// Records `repos` as the current list under `roots`.
+pub fn store(roots: &[PathBuf], depth: usize, repos: &[Repo]) {
     save(
-        &path,
+        &cache_path(roots, depth),
         &Cache {
-            roots: stamps,
+            roots: root_stamps(roots),
             depth,
             written: now(),
-            repos: repos.clone(),
+            repos: repos.to_vec(),
         },
     );
-    repos
 }
 
 /// Drops linked worktrees whose main working tree is also listed. Worktrees share their
@@ -125,6 +131,10 @@ pub fn drop_linked_worktrees(repos: Vec<Repo>) -> Vec<Repo> {
             is_main(r) || (!mains.contains(&r.common_dir) && kept.insert(r.common_dir.clone()))
         })
         .collect()
+}
+
+fn root_stamps(roots: &[PathBuf]) -> Vec<(PathBuf, u64)> {
+    roots.iter().map(|r| (r.clone(), mtime(r))).collect()
 }
 
 fn save(path: &Path, cache: &Cache) {
@@ -157,12 +167,16 @@ pub fn home() -> PathBuf {
 
 /// Walks each root up to `depth` levels and resolves every working tree it finds.
 pub fn discover(roots: &[PathBuf], depth: usize) -> Vec<Repo> {
-    let mut trees = Vec::new();
+    scan(roots, depth).1
+}
+
+/// Every folder searched under `roots`, each with how many levels below it are still
+/// searched, and the repositories found in them.
+pub fn scan(roots: &[PathBuf], depth: usize) -> (Vec<(PathBuf, usize)>, Vec<Repo>) {
+    let mut folders = Vec::new();
     let mut tops = Vec::new();
     for root in roots {
-        if root.join(".git").exists() {
-            trees.push(root.clone());
-        }
+        folders.push((root.clone(), depth));
         if depth > 0 {
             tops.extend(subfolders(root));
         }
@@ -183,21 +197,23 @@ pub fn discover(roots: &[PathBuf], depth: usize) -> Vec<Repo> {
             })
             .collect();
         for handle in handles {
-            trees.extend(handle.join().unwrap_or_default());
+            folders.extend(handle.join().unwrap_or_default());
         }
     });
-    trees.sort();
-    trees.dedup();
-    trees.iter().filter_map(|t| resolve(t)).collect()
+    folders.sort();
+    folders.dedup();
+    let repos = folders
+        .iter()
+        .filter(|(dir, _)| dir.join(".git").exists())
+        .filter_map(|(dir, _)| resolve(dir))
+        .collect();
+    (folders, repos)
 }
 
-/// Collects every folder with a `.git` entry, including repositories nested inside others,
-/// since a root folder may itself hold a `.git` folder. Folders that `git` does not
-/// accept as repositories are dropped when resolved.
-fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
-    if dir.join(".git").exists() {
-        found.push(dir.to_path_buf());
-    }
+/// Collects `dir` and its subfolders down to `depth` more levels. Repositories may be nested
+/// inside others, since a root folder may itself hold a `.git` folder.
+fn walk(dir: &Path, depth: usize, found: &mut Vec<(PathBuf, usize)>) {
+    found.push((dir.to_path_buf(), depth));
     if depth > 0 {
         for sub in subfolders(dir) {
             walk(&sub, depth - 1, found);
@@ -213,19 +229,20 @@ fn subfolders(dir: &Path) -> Vec<PathBuf> {
     entries
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref())
-        })
+        .filter(|entry| searched(&entry.file_name().to_string_lossy()))
         .map(|entry| entry.path())
         .collect()
+}
+
+/// Whether a folder with this name is searched for repositories.
+pub fn searched(name: &str) -> bool {
+    !name.starts_with('.') && !SKIP_DIRS.contains(&name)
 }
 
 /// Reads a working tree's git directories from its `.git` entry without running git: a
 /// folder, or for linked worktrees and submodules a `gitdir:` file, whose target holds a
 /// `commondir` file when it is a linked worktree.
-fn resolve(tree: &Path) -> Option<Repo> {
+pub fn resolve(tree: &Path) -> Option<Repo> {
     let dot_git = tree.join(".git");
     let git_dir = if dot_git.is_dir() {
         dot_git

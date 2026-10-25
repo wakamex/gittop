@@ -3,6 +3,7 @@
 use crate::activity::{Activity, Commit};
 use crate::repos::{self, Repo};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +88,8 @@ pub struct App {
     pub help: bool,
     pub paused: bool,
     pub ready: bool,
+    /// Repositories removed while running; they keep their index but are not listed.
+    pub gone: HashSet<usize>,
 }
 
 impl App {
@@ -107,6 +110,22 @@ impl App {
             help: false,
             paused: false,
             ready: false,
+            gone: HashSet::new(),
+        }
+    }
+
+    /// Lists a repository found while running, at the next index.
+    pub fn add(&mut self, repo: Repo, roots: &[PathBuf]) {
+        self.names.push(repo.name(roots));
+        self.repos.push(repo);
+        self.activity.push(None);
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        self.gone.insert(index);
+        self.activity[index] = None;
+        if self.detail == Some(index) {
+            self.detail = None;
         }
     }
 
